@@ -1,0 +1,209 @@
+---
+title: "Differential Privacy Simulation Restructured"
+author: "Austin Chan"
+date: "July 10, 2020"
+output: html_document
+---
+
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(sqldf)
+library(data.table)
+```
+
+```{r}
+collegeid = read_xlsx("../Simulated Data/Valid Entries.xlsx",sheet = "CollegeID", col_types = "text")
+term = read_xlsx("../Simulated Data/Valid Entries.xlsx",sheet = "Term", col_types = "text")
+race = read_xlsx("../Simulated Data/Valid Entries.xlsx",sheet = "Race", col_types = "text")
+```
+
+
+```{r}
+#this function simulates a specified number of students
+#num_students      - specify how many students you want to simulate
+#random_seed       - specify a random seed to make sure your data is reproducible
+#foster_percentage - specify the percentage of students to be flagged as foster youth
+
+simulate_students = function(num_students = 150000, random_seed = 100, foster_percentage = 0.03){
+  
+  set.seed(random_seed)
+
+  students = data.frame(Derkey1 = paste("ID",seq(1,num_students),sep = ""),
+                        foster = sample(c(0,1),num_students, replace = T, prob = c(1-foster_percentage,foster_percentage)),
+                        race = sample(race$race,num_students, replace = T),
+                        CollegeId = sample(collegeid$collegeid, num_students, replace = T),
+                        stringsAsFactors = F)
+  
+  #cross join to terms to get all possible combinations of students and term enrollments
+  query = "
+  
+  select *
+  from students
+  cross join
+    term
+  
+  
+  "
+  
+  final_output = sqldf(query)
+  
+  return(final_output)
+}
+```
+
+
+```{r}
+#run simulation for 150,000 students to create dataframe with all possible student-term enrollment combinations
+students = simulate_students(150000,100,0.03)
+
+length(students[,1])
+```
+
+```{r}
+#this function creates the student-level data table (wide table)
+#students_crossed - ouptut from the simulate_students function
+#num_rows - the number of rows you want to simulate
+sample_students = function(students_crossed, 
+                           num_rows,
+                           m1_percentage = 0.001,
+                           m2_percentage = 0.01,
+                           m3_percentage = 0.1,
+                           m4_percentage = 0.5,
+                           random_seed = 100){
+  
+  if(num_rows > length(students_crossed[,1])){
+    
+    error_msg = paste("Error: num_rows cannot exceed total number of combinations of students and terms: ",length(students_crossed[,1])," rows",sep="")
+    
+    stop(error_msg)
+    
+  }
+  
+  set.seed(random_seed)
+  
+  select_students = sample_n(students_crossed, num_rows, replace = F)
+  
+  metric_1 = sample(c(0,1),num_rows, replace = T, prob = c(1-m1_percentage,m1_percentage))
+  metric_2 = sample(c(0,1),num_rows, replace = T, prob = c(1-m2_percentage,m2_percentage))
+  metric_3 = sample(c(0,1),num_rows, replace = T, prob = c(1-m3_percentage,m3_percentage))
+  metric_4 = sample(c(0,1),num_rows, replace = T, prob = c(1-m4_percentage,m4_percentage))
+  metric_5 = metric_4 + metric_3 + rnorm(num_rows,mean = 0, sd = 1)
+  metric_6 = metric_1 + metric_2 + rnorm(num_rows,mean = 0, sd = 1)
+  
+  metric_df = data.frame(metric_1 = metric_1, 
+                         metric_2 = metric_2, 
+                         metric_3 = metric_3, 
+                         metric_4 = metric_4,
+                         metric_5 = metric_5,
+                         metric_6 = metric_6)
+  
+  final_output = cbind(select_students,metric_df)
+  
+  
+  return(final_output)
+}
+```
+
+```{r}
+simulated_metrics = sample_students(students,1000000)
+
+simulated_metrics
+```
+
+```{r}
+#r cube using data.table package
+
+simulated_metrics_dt = data.table(simulated_metrics)
+
+cube_m1_num = cube(simulated_metrics_dt, j = sum(metric_1), by= c("foster","race","CollegeId","AcademicYear"))
+cube_m1_denom = cube(simulated_metrics_dt, j = length(metric_1), by= c("foster","race","CollegeId","AcademicYear"))
+cube_m2_num = cube(simulated_metrics_dt, j = sum(metric_2), by= c("foster","race","CollegeId","AcademicYear"))
+cube_m2_denom = cube(simulated_metrics_dt, j = length(metric_2), by= c("foster","race","CollegeId","AcademicYear"))
+cube_m3_num = cube(simulated_metrics_dt, j = sum(metric_3), by= c("foster","race","CollegeId","AcademicYear"))
+cube_m3_denom = cube(simulated_metrics_dt, j = length(metric_3), by= c("foster","race","CollegeId","AcademicYear"))
+cube_m4_num = cube(simulated_metrics_dt, j = sum(metric_4), by= c("foster","race","CollegeId","AcademicYear"))
+cube_m5_num = cube(simulated_metrics_dt, j = sum(metric_5), by= c("foster","race","CollegeId","AcademicYear"))
+cube_m6_num = cube(simulated_metrics_dt, j = sum(metric_6), by= c("foster","race","CollegeId","AcademicYear"))
+```
+
+```{r}
+cube_m1_num$denom = cube_m1_denom$V1
+cube_m1_num$metric_id = "metric_1"
+
+cube_m2_num$denom = cube_m2_denom$V1
+cube_m2_num$metric_id = "metric_2"
+
+cube_m3_num$denom = cube_m3_denom$V1
+cube_m3_num$metric_id = "metric_3"
+
+cube_m4_num$denom = NA
+cube_m4_num$metric_id = "metric_4"
+
+cube_m5_num$denom = NA
+cube_m5_num$metric_id = "metric_5"
+
+cube_m6_num$denom = NA
+cube_m6_num$metric_id = "metric_6"
+```
+
+
+```{r}
+final_output = bind_rows(cube_m1_num,cube_m2_num,cube_m3_num,cube_m4_num,cube_m5_num,cube_m6_num)
+final_output$percentage = final_output$V1/final_output$denom
+
+export = final_output %>%
+  select(metric_id,foster,race,CollegeId,AcademicYear, metric_value = V1,denom,percentage)
+```
+
+
+```{r}
+export$foster[is.na(export$foster)==T] = "All"
+export$race[is.na(export$race)==T] = "All"
+export$CollegeId[is.na(export$CollegeId)==T] = "All"
+export$AcademicYear[is.na(export$AcademicYear)==T] = "All"
+```
+
+```{r}
+simulated_metrics
+export
+```
+
+
+```{r}
+write.csv(simulated_metrics,"Simulated Wide Table.csv",row.names = F)
+write.csv(export,"Simulated Results Table.csv",row.names = F)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
